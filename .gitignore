@@ -1,0 +1,11 @@
+# Local device configuration; create from each sketch's secrets.example.h
+**/secrets.h
+temp-scripts/code.js
+
+# Common embedded build output
+.pio/
+build/
+*.elf
+*.hex
+*.map
+*.bin

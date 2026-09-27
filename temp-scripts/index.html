@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+
+    <script src="https://www.gstatic.com/charts/loader.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 16px;
+            font-family: Arial;
+            background: #0f1115;
+            color: #e6e6e6;
+        }
+
+        #summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .card {
+            background: #1a1d24;
+            padding: 10px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .label {
+            font-size: 12px;
+            color: #aaa;
+        }
+
+        .value {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        #chartHotCold {
+            width: 100%;
+            height: max(30vh, 260px);
+            background: #1a1d24;
+            border-radius: 12px;
+            margin-bottom: 12px;
+        }
+
+        #chart {
+            width: 100%;
+            height: max(50vh, 360px);
+            background: #1a1d24;
+            border-radius: 12px;
+            margin-bottom: 12px;
+        }
+
+        #chart2 {
+            width: 100%;
+            height: max(18vh, 240px);
+            background: #1a1d24;
+            border-radius: 12px;
+        }
+
+        #chartStatus {
+            margin-bottom: 12px;
+            padding: 18px;
+            border-radius: 10px;
+            background: #1a1d24;
+            color: #ccc;
+        }
+
+        #chartStatus[hidden] {
+            display: none;
+        }
+
+        #chartControls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: 6px;
+            margin-bottom: 12px;
+            color: #ccc;
+            font-size: 14px;
+        }
+
+        .chart-span-button {
+            padding: 10px 14px;
+            border: 1px solid transparent;
+            border-radius: 10px;
+            background: #1a1d24;
+            color: #e6e6e6;
+            font: inherit;
+            cursor: pointer;
+        }
+
+        .chart-span-button:hover {
+            background: #252a34;
+        }
+
+        .chart-span-button[aria-pressed="true"] {
+            border-color: #3399ff;
+            background: #202b3a;
+            color: #fff;
+        }
+
+        @media (max-width: 480px) {
+            body {
+                padding: 10px;
+            }
+
+            #summary {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 6px;
+            }
+
+            #chartControls {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+
+            .chart-span-button {
+                padding: 9px 4px;
+            }
+        }
+    </style>
+
+    <!-- SAFE DATA INJECTION -->
+    <script>
+        window.__DATA__ = <?!= JSON.stringify(data) ?>;
+    </script>
+
+    <script>
+        const data = window.__DATA__;
+
+        google.charts.load('current', {
+            packages: ['corechart']
+        });
+
+        google.charts.setOnLoadCallback(init);
+
+        function renderSummary() {
+            const c = data.current;
+
+            const items = [
+                ['Hot', c.hot],
+                ['Cold', c.cold],
+                ['Out', c.out],
+                ['Floor 0', c.floor0],
+                ['Floor 1', c.floor1],
+                ['Floor 2', c.floor2],
+                ['Humidity', c.humidity],
+            ];
+
+            document.getElementById('summary').innerHTML =
+                items.map(i => `
+                    <div class="card">
+                        <div class="label">${i[0]}</div>
+                            <div class="value">${i[1] === '' || i[1] == null ? 'n/a' : i[1]}</div>
+                    </div>
+                `).join('');
+        }
+
+        function drawChart() {
+            const chartStatus = document.getElementById('chartStatus');
+            const chartElements = ['chartHotCold', 'chart', 'chart2'].map(id =>
+                document.getElementById(id)
+            );
+            const validChartData = (Array.isArray(data.chartData) ? data.chartData : [])
+                .filter(row => row[0] && Number.isFinite(new Date(row[0]).getTime()));
+
+            if (!validChartData.length) {
+                chartStatus.hidden = false;
+                chartElements.forEach(element => element.hidden = true);
+                return;
+            }
+
+            chartStatus.hidden = true;
+            chartElements.forEach(element => element.hidden = false);
+
+            const spanHours = Number(document.querySelector('.chart-span-button[aria-pressed="true"]').dataset.hours);
+            const latestTime = validChartData.reduce((latest, row) =>
+                Math.max(latest, new Date(row[0]).getTime()), 0
+            );
+            const cutoffTime = latestTime - spanHours * 60 * 60 * 1000;
+            const chartData = validChartData.filter(row =>
+                new Date(row[0]).getTime() >= cutoffTime
+            );
+
+            // ==========================================
+            // HOT / COLD CHART
+            // ==========================================
+
+            const dtHotCold = new google.visualization.DataTable();
+
+            dtHotCold.addColumn('datetime', 'Time');
+            dtHotCold.addColumn('number', 'Hot');
+            dtHotCold.addColumn('number', 'Cold');
+
+            dtHotCold.addRows(
+                chartData.map(r => [
+                    new Date(r[0]),
+                    r[5], // Hot
+                    r[6]  // Cold
+                ])
+            );
+
+            const optionsHotCold = {
+                backgroundColor: '#1a1d24',
+
+                legend: {
+                    position: 'top',
+                    textStyle: {
+                        color: '#ddd'
+                    }
+                },
+
+                colors: [
+                    '#ff3333', // Hot
+                    '#3399ff'  // Cold
+                ],
+
+                hAxis: {
+                    textStyle: {
+                        color: '#ccc'
+                    },
+                    gridlines: {
+                        color: '#2a2f3a'
+                    }
+                },
+
+                vAxis: {
+                    title: 'Water Temperature °C',
+                    textStyle: {
+                        color: '#ccc'
+                    },
+                    titleTextStyle: {
+                        color: '#ccc'
+                    },
+                    gridlines: {
+                        color: '#2a2f3a'
+                    }
+                },
+
+                series: {
+                    0: {
+                        lineWidth: 2
+                    },
+                    1: {
+                        lineWidth: 2
+                    }
+                },
+
+                chartArea: {
+                    left: 60,
+                    top: 40,
+                    width: '95%',
+                    height: '75%'
+                }
+            };
+
+            const chartHotCold =
+                new google.visualization.LineChart(
+                    document.getElementById('chartHotCold')
+                );
+
+            chartHotCold.draw(
+                dtHotCold,
+                optionsHotCold
+            );
+
+
+            // ==========================================
+            // MAIN TEMPERATURE CHART
+            // Floor 0 / Floor 1 / Floor 2 / Out
+            // ==========================================
+
+            const dtMain = new google.visualization.DataTable();
+
+            dtMain.addColumn('datetime', 'Time');
+            dtMain.addColumn('number', 'Floor 0');
+            dtMain.addColumn('number', 'Floor 1');
+            dtMain.addColumn('number', 'Floor 2');
+            dtMain.addColumn('number', 'Out');
+
+            dtMain.addRows(
+                chartData.map(r => [
+                    new Date(r[0]),
+                    r[1],
+                    r[2],
+                    r[3],
+                    r[4]
+                ])
+            );
+
+            const optionsMain = {
+                backgroundColor: '#1a1d24',
+
+                legend: {
+                    position: 'top',
+                    textStyle: {
+                        color: '#ddd'
+                    }
+                },
+
+                colors: [
+                    '#00ff66', // Floor 0
+                    '#00ffff', // Floor 1
+                    '#ffff00', // Floor 2
+                    '#ffffff'  // Out
+                ],
+
+                hAxis: {
+                    textStyle: {
+                        color: '#ccc'
+                    },
+                    gridlines: {
+                        color: '#2a2f3a'
+                    }
+                },
+
+                vAxis: {
+                    title: 'Air Temperature °C',
+                    textStyle: {
+                        color: '#ccc'
+                    },
+                    titleTextStyle: {
+                        color: '#ccc'
+                    },
+                    gridlines: {
+                        color: '#2a2f3a'
+                    }
+                },
+
+                chartArea: {
+                    left: 60,
+                    top: 40,
+                    width: '95%',
+                    height: '80%'
+                }
+            };
+
+            const chartMain =
+                new google.visualization.LineChart(
+                    document.getElementById('chart')
+                );
+
+            chartMain.draw(
+                dtMain,
+                optionsMain
+            );
+
+
+            // ==========================================
+            // HUMIDITY / PRESSURE CHART
+            // ==========================================
+
+            const dt2 = new google.visualization.DataTable();
+
+            dt2.addColumn('datetime', 'Time');
+            dt2.addColumn('number', 'Humidity');
+            dt2.addColumn('number', 'Pressure');
+
+            dt2.addRows(
+                chartData.map(r => [
+                    new Date(r[0]),
+                    r[8], // Humidity
+                    r[7]  // Pressure
+                ])
+            );
+
+            const options2 = {
+                backgroundColor: '#1a1d24',
+
+                legend: {
+                    position: 'top',
+                    textStyle: {
+                        color: '#ddd'
+                    }
+                },
+
+                colors: [
+                    '#3399ff',
+                    '#ff00ff'
+                ],
+
+                hAxis: {
+                    textStyle: {
+                        color: '#ccc'
+                    },
+                    gridlines: {
+                        color: '#2a2f3a'
+                    }
+                },
+
+                vAxes: {
+                    0: {
+                        title: 'Humidity %',
+                        textStyle: {
+                            color: '#ccc'
+                        },
+                        titleTextStyle: {
+                            color: '#ccc'
+                        },
+                        gridlines: {
+                            color: 'transparent'
+                        },
+                        minorGridlines: {
+                            color: 'transparent'
+                        }
+                    },
+
+                    1: {
+                        title: 'Pressure (hPa)',
+                        textStyle: {
+                            color: '#ccc'
+                        },
+                        titleTextStyle: {
+                            color: '#ccc'
+                        },
+                        gridlines: {
+                            color: 'transparent'
+                        },
+                        minorGridlines: {
+                            color: 'transparent'
+                        }
+                    }
+                },
+
+                series: {
+                    0: {
+                        targetAxisIndex: 0,
+                        lineWidth: 2
+                    },
+                    1: {
+                        targetAxisIndex: 1,
+                        lineWidth: 2
+                    }
+                },
+
+                chartArea: {
+                    left: 60,
+                    top: 30,
+                    width: '95%',
+                    height: '70%'
+                }
+            };
+
+            const chart2 =
+                new google.visualization.ComboChart(
+                    document.getElementById('chart2')
+                );
+
+            chart2.draw(
+                dt2,
+                options2
+            );
+
+
+            // ==========================================
+            // RESIZE
+            // ==========================================
+
+        }
+
+        function init() {
+            renderSummary();
+            document.querySelectorAll('.chart-span-button').forEach(button => {
+                button.addEventListener('click', () => {
+                    document.querySelectorAll('.chart-span-button').forEach(option => {
+                        option.setAttribute('aria-pressed', String(option === button));
+                    });
+                    drawChart();
+                });
+            });
+            window.addEventListener('resize', drawChart);
+            drawChart();
+        }
+    </script>
+</head>
+
+<body>
+    <div id="chartControls">
+        <button class="chart-span-button" type="button" data-hours="3" aria-pressed="false">3 hours</button>
+        <button class="chart-span-button" type="button" data-hours="6" aria-pressed="true">6 hours</button>
+        <button class="chart-span-button" type="button" data-hours="12" aria-pressed="false">12 hours</button>
+        <button class="chart-span-button" type="button" data-hours="24" aria-pressed="false">24 hours</button>
+        <button class="chart-span-button" type="button" data-hours="48" aria-pressed="false">48 hours</button>
+        <button class="chart-span-button" type="button" data-hours="72" aria-pressed="false">72 hours</button>
+    </div>
+
+    <div id="summary"></div>
+
+    <div id="chartStatus" role="status" hidden>No timestamped readings are available to chart.</div>
+
+    <!-- Hot / Cold FIRST -->
+    <div id="chartHotCold"></div>
+
+    <!-- Floor temperatures -->
+    <div id="chart"></div>
+
+    <!-- Humidity / Pressure -->
+    <div id="chart2"></div>
+
+</body>
+
+</html>
