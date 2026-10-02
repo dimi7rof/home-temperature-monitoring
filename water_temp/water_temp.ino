@@ -98,9 +98,18 @@ float g0 = DEVICE_DISCONNECTED_C;
 float gPressure = DEVICE_DISCONNECTED_C;
 float gHumidity = DEVICE_DISCONNECTED_C;
 
+// true = last fetch failed (value shown with '*', not sent to sheets)
+bool s2 = false, s1 = false, sOut = false;
+bool bmpOk = false;
+
+// Rejects NaN, DEVICE_DISCONNECTED_C (-127) and DS18B20 -127 + offset
+bool valid(float val) {
+  return !isnan(val) && val >= -50.0f;
+}
+
 String buildJson() {
   auto v = [](float val) -> String {
-    if (val == DEVICE_DISCONNECTED_C || val < -50.0f) return "null";
+    if (!valid(val)) return "null";
 
     char buf[16];
     dtostrf(val, 1, 2, buf);
@@ -113,9 +122,9 @@ String buildJson() {
 
   String json = "{";
   json += "\"floor0\":" + v(g0) + ",";
-  json += "\"floor1\":" + v(g1) + ",";
-  json += "\"floor2\":" + v(g2) + ",";
-  json += "\"out\":" + v(gOut) + ",";
+  json += "\"floor1\":" + v(s1 ? NAN : g1) + ",";
+  json += "\"floor2\":" + v(s2 ? NAN : g2) + ",";
+  json += "\"out\":" + v(sOut ? NAN : gOut) + ",";
   json += "\"pressure\":" + v(gPressure) + ",";
   json += "\"hot\":" + v(gHot) + ",";
   json += "\"cold\":" + v(gCold) + ",";
@@ -126,36 +135,39 @@ String buildJson() {
 }
 
 // Verbose HTTP fetch with full Serial diagnostics
-void fetchTemp(const char* url, float& out) {
+// On success updates out and clears stale; on failure keeps last value and sets stale.
+void fetchTemp(const char* url, float& out, bool& stale) {
+  stale = true;
+  Serial.printf("[FETCH] %s ", url);
+
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("SKIP (WiFi down)");
     return;
   }
-
-  ArduinoOTA.handle();
 
   HTTPClient http;
   http.begin(url);
   http.setTimeout(2000);
 
   int code = http.GET();
-  Serial.printf("HTTP %d  ", code);
+  Serial.printf("HTTP %d\n", code);
 
   if (code == 200) {
     String body = http.getString();
-
     int idx = body.indexOf("\"temperature\"");
-    if (idx == -1) {
-      http.end();
-      return;
+    if (idx != -1) idx = body.indexOf(':', idx);
+    if (idx != -1) {
+      String s = body.substring(idx + 1);
+      s.trim();
+      // toFloat() returns 0 for "null"/garbage, so require a number
+      if (s.length() && (isDigit(s[0]) || s[0] == '-')) {
+        float parsed = s.toFloat();
+        if (valid(parsed)) {
+          out = parsed;
+          stale = false;
+        }
+      }
     }
-    idx = body.indexOf(':', idx);
-    if (idx == -1) {
-      http.end();
-      return;
-    }
-    float parsed = body.substring(idx + 1).toFloat();
-    out = parsed;
   }
 
   http.end();
@@ -178,28 +190,33 @@ uint16_t wifiColor(int rssi) {
 }
 
 // Print temperature at text size 3 (same visual weight as hot/cold)
-void eraseAndPrint(int size, int x, int y, float val, uint16_t color, uint16_t bgColor = ST77XX_BLACK) {
+// Padded to 5 chars so shorter values / removed '*' don't leave leftovers
+void eraseAndPrint(int size, int x, int y, float val, uint16_t color, uint16_t bgColor = ST77XX_BLACK, bool stale = false) {
+  char buf[12];
+  if (valid(val)) snprintf(buf, sizeof(buf), "%.1f%s", val, stale ? "*" : "");
+  else strcpy(buf, "--");
   tft.setTextSize(size);
   tft.setCursor(x, y);
   tft.setTextColor(color, bgColor);
-  if (val != DEVICE_DISCONNECTED_C && val >= -50.0f) {
-    tft.print(val, 1);
-  }
+  tft.printf("%-5s", buf);
 }
 
 // ---------- TOP STRIP ----------
 void printWifi() {
-  int rssi = WiFi.RSSI();
   tft.setTextSize(1);
-  tft.setTextColor(wifiColor(rssi), ST77XX_BLACK);
   tft.setCursor(60, 2);
-  tft.print("WiFi:");
-  tft.print(rssi);
-  tft.print("dB");
+  if (WiFi.status() == WL_CONNECTED) {
+    int rssi = WiFi.RSSI();
+    tft.setTextColor(wifiColor(rssi), ST77XX_BLACK);
+    tft.printf("WiFi:%4ddB", rssi);
+  } else {
+    tft.setTextColor(RED, ST77XX_BLACK);
+    tft.print("WiFi:  down");
+  }
 }
 
 uint16_t getRoomColor(float temp) {
-  if (temp == DEVICE_DISCONNECTED_C) return GRAY;
+  if (!valid(temp)) return GRAY;
   if (temp > 30.0f) return RED;
   if (temp > 25.0f) return YELLOW;
   if (temp > 20.0f) return GREEN;
@@ -208,9 +225,9 @@ uint16_t getRoomColor(float temp) {
 }
 
 void printAirTemps() {
-  eraseAndPrint(AIR_SIZE, TEMP_X, TEMP_Y_OUT, gOut, getRoomColor(gOut));
-  eraseAndPrint(AIR_SIZE, TEMP_X, TEMP_Y_F2, g2, getRoomColor(g2), LIGHT_GRAY);
-  eraseAndPrint(AIR_SIZE, TEMP_X, TEMP_Y_F1, g1, getRoomColor(g1), LIGHT_GRAY);
+  eraseAndPrint(AIR_SIZE, TEMP_X, TEMP_Y_OUT, gOut, getRoomColor(gOut), ST77XX_BLACK, sOut);
+  eraseAndPrint(AIR_SIZE, TEMP_X, TEMP_Y_F2, g2, getRoomColor(g2), LIGHT_GRAY, s2);
+  eraseAndPrint(AIR_SIZE, TEMP_X, TEMP_Y_F1, g1, getRoomColor(g1), LIGHT_GRAY, s1);
   eraseAndPrint(AIR_SIZE, TEMP_X, TEMP_Y_IN, g0, getRoomColor(g0), LIGHT_GRAY);
 }
 
@@ -253,8 +270,8 @@ void drawHouse() {
     tft.drawFastHLine(x0, y, x1 - x0 + 1, roofColor);
   }
   // Roof outline
-  tft.drawLine(HOUSE_MID_X, HOUSE_Y_PEAK, HOUSE_X1-5, HOUSE_Y_EAVE, WHITE);
-  tft.drawLine(HOUSE_MID_X, HOUSE_Y_PEAK, HOUSE_X2+5, HOUSE_Y_EAVE, WHITE);
+  tft.drawLine(HOUSE_MID_X, HOUSE_Y_PEAK, HOUSE_X1 - 5, HOUSE_Y_EAVE, WHITE);
+  tft.drawLine(HOUSE_MID_X, HOUSE_Y_PEAK, HOUSE_X2 + 5, HOUSE_Y_EAVE, WHITE);
 
   // Walls
   tft.fillRect(HOUSE_X1, HOUSE_Y_EAVE,
@@ -272,13 +289,11 @@ void drawHouse() {
   tft.drawFastHLine(0, HOUSE_Y_GROUND, DISP_W, GRAY);
 }
 
-void postToSheets() {
+int postToSheets() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[SHEETS] SKIP (WiFi down)");
-    return;
+    return -1;
   }
-
-  ArduinoOTA.handle();
 
   String body = buildJson();
 
@@ -290,6 +305,8 @@ void postToSheets() {
 
   int code = http.POST((uint8_t*)body.c_str(), body.length());
   http.end();
+  Serial.printf("[SHEETS] %s -> HTTP %d\n", body.c_str(), code);
+  return code;
 }
 
 unsigned long row = 1;
@@ -303,6 +320,12 @@ void showStatus(const char* line, uint16_t color = WHITE) {
   row++;
   tft.setCursor(5, y);
   tft.print(line);
+}
+
+void drawStaticUI() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.drawFastHLine(0, 88, DISP_W, GRAY);
+  drawHouse();
 }
 
 void setupOta() {
@@ -341,33 +364,31 @@ void setupOta() {
       ESP.restart();
     })
     .onError([](ota_error_t error) {
-      otaInProgress = false;
-
       showOTA("ERROR!");
-      delay(500);
+      delay(2000);
+      drawStaticUI();  // otherwise the house is gone until reboot
+      otaInProgress = false;
     });
 
   ArduinoOTA.begin();
 }
 
-void drawStaticUI() {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.drawFastHLine(0, 88, DISP_W, GRAY);
-  drawHouse();
-}
-
 void readLocalSensors() {
-  ds18b20.requestTemperatures();
-  ds18b20.setWaitForConversion(true);
+  // Non-blocking: read the conversion started last time, then start the next one
+  // (blocking conversion stalled loop()/OTA/web server ~750 ms every 2 s)
   gHot = ds18b20.getTempCByIndex(0) + HOT_TEMP_OFFSET;
   gCold = ds18b20.getTempCByIndex(1) + COLD_TEMP_OFFSET;
+  ds18b20.requestTemperatures();
 
   sensors_event_t humidity, temp;
-  aht.getEvent(&humidity, &temp);
-  g0 = temp.temperature + INSIDE_TEMP_OFFSET;
-  gHumidity = humidity.relative_humidity;
+  if (aht.getEvent(&humidity, &temp)) {
+    g0 = temp.temperature + INSIDE_TEMP_OFFSET;
+    gHumidity = humidity.relative_humidity;
+  } else {
+    g0 = gHumidity = NAN;
+  }
 
-  gPressure = bmp.readPressure() / 100.0f;
+  gPressure = bmpOk ? bmp.readPressure() / 100.0f : NAN;
 }
 
 void bootPrintLocalSensors() {
@@ -389,15 +410,15 @@ void bootPrintLocalSensors() {
 }
 
 void fetchOut() {
-  fetchTemp(OUT_SENSOR_URL, gOut);
+  fetchTemp(OUT_SENSOR_URL, gOut, sOut);
 }
 
 void fetchFloor1() {
-  fetchTemp(FLOOR1_SENSOR_URL, g1);
+  fetchTemp(FLOOR1_SENSOR_URL, g1, s1);
 }
 
 void fetchFloor2() {
-  fetchTemp(FLOOR2_SENSOR_URL, g2);
+  fetchTemp(FLOOR2_SENSOR_URL, g2, s2);
 }
 
 void readRemoteSensors() {
@@ -412,29 +433,26 @@ void bootPrintRemoteSensors() {
 
   char buf[32];
   fetchFloor2();
-  if (g2 != DEVICE_DISCONNECTED_C) {
+  if (!s2) {
     snprintf(buf, sizeof(buf), "F2 = %.1f", g2);
     showStatus(buf, GREEN);
-  }
-  else {
+  } else {
     showStatus("F2 FAIL", RED);
   }
 
   fetchFloor1();
-  if (g1 != DEVICE_DISCONNECTED_C) {
+  if (!s1) {
     snprintf(buf, sizeof(buf), "F1 = %.1f", g1);
     showStatus(buf, GREEN);
-  }
-  else {
+  } else {
     showStatus("F1 FAIL", RED);
   }
 
   fetchOut();
-  if (gOut != DEVICE_DISCONNECTED_C) {
+  if (!sOut) {
     snprintf(buf, sizeof(buf), "OUT = %.1f", gOut);
     showStatus(buf, GREEN);
-  }
-  else {
+  } else {
     showStatus("OUT FAIL", RED);
   }
 }
@@ -442,12 +460,21 @@ void bootPrintRemoteSensors() {
 TaskHandle_t httpTask = NULL;
 
 void httpWorker(void* param) {
-  TickType_t lastLog = 0;   // 0 forces immediate post on first wake
+  TickType_t lastLog = xTaskGetTickCount();  // boot post already done in setup()
 
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(30000));
 
-    readRemoteSensors();
+    if (otaInProgress) continue;
+
+    // Auto-reconnect alone often gets stuck; kick it every 30 s while down
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[WIFI] down, reconnecting");
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    }
+
+    readRemoteSensors();  // while WiFi is down this marks remotes stale
 
     if (xTaskGetTickCount() - lastLog >= pdMS_TO_TICKS(LOG_INTERVAL_MS)) {
       postToSheets();
@@ -469,55 +496,52 @@ void setup() {
 
   // DS18B20
   ds18b20.begin();
-  ds18b20.requestTemperatures();
-  ds18b20.setWaitForConversion(true);
+  ds18b20.requestTemperatures();  // blocking by default
   float Hot = ds18b20.getTempCByIndex(0);
   float Cold = ds18b20.getTempCByIndex(1);
   if (Hot == DEVICE_DISCONNECTED_C || Cold == DEVICE_DISCONNECTED_C) {
     showStatus("DS18B20 FAIL", RED);
-  }
-  else {
+  } else {
     showStatus("DS18B20 OK", GREEN);
   }
+  ds18b20.setWaitForConversion(false);
+  ds18b20.requestTemperatures();  // ready for first readLocalSensors()
 
   // AHT
   if (aht.begin()) {
     showStatus("AHT20 OK", GREEN);
-  }
-  else {
+  } else {
     showStatus("AHT20 FAIL", RED);
   }
 
   // BMP
-  if (bmp.begin()) {
+  bmpOk = bmp.begin();
+  if (bmpOk) {
     showStatus("BMP280 OK", GREEN);
-  }
-  else {
+  } else {
     showStatus("BMP280 FAIL", RED);
   }
 
   // WiFi
   showStatus("Connecting...");
 
-  WiFi.setSleep(false);
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  while (WiFi.status() != WL_CONNECTED) {
-    ArduinoOTA.handle();
+  // Don't hang forever: without WiFi still show local sensors, worker retries
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 20000) {
     delay(500);
   }
 
-  String ip = WiFi.localIP().toString();
-  showStatus(ip.c_str(), GREEN);
-
-  xTaskCreatePinnedToCore(
-    httpWorker, "httpWorker",
-    8192,        // stack
-    NULL, 1,     // priority (lower than main loop = 1)
-    &httpTask,
-    1            // core 1, leave core 0 for OTA
-  );
+  if (WiFi.status() == WL_CONNECTED) {
+    String ip = WiFi.localIP().toString();
+    showStatus(ip.c_str(), GREEN);
+  } else {
+    showStatus("WiFi FAIL", RED);
+  }
 
   // mDNS
   MDNS.begin("w-temp");
@@ -534,6 +558,20 @@ void setup() {
 
   // Initial read to populate display immediately
   bootPrintRemoteSensors();
+
+  // Log boot readings
+  int code = postToSheets();
+  char buf[32];
+  snprintf(buf, sizeof(buf), "Sheets %d", code);
+  showStatus(buf, code > 0 && code < 400 ? GREEN : RED);
+
+  // Started after boot reads so two tasks never use HTTP at once
+  xTaskCreatePinnedToCore(
+    httpWorker, "httpWorker",
+    8192,     // stack
+    NULL, 1,  // same priority as loop()
+    &httpTask,
+    1);
 
   // Final
   showStatus("READY", GREEN);
